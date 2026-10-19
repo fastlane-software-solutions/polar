@@ -44,6 +44,11 @@ void main() {
   testBleSdkFeatures(identifier, features: PolarSdkFeature.values.toSet());
   testStreaming(identifier, features: PolarDataType.values.toSet());
   testRecording(identifier, wait: false);
+  testOfflineRecording(
+    identifier,
+    features: offlineRecordingFeatures,
+    recordingDuration: Duration.zero,
+  );
   testSdkMode(identifier);
   testMisc(identifier, supportsLedConfig: true);
   testFtu(identifier);
@@ -54,6 +59,36 @@ final exercises = <PolarExerciseEntry>[];
 var recording = false;
 var exerciseId = '';
 var sdkModeEnabled = false;
+
+const offlineRecordingFeatures = {
+  PolarDataType.acc,
+  PolarDataType.gyro,
+  PolarDataType.magnetometer,
+  PolarDataType.ppg,
+  PolarDataType.ppi,
+  PolarDataType.hr,
+  PolarDataType.temperature,
+  PolarDataType.skinTemperature,
+};
+final offlineRecordings = <PolarDataType>{};
+final offlineRecordingEntries = <PolarOfflineRecordingEntry>[];
+var offlineRecordingTrigger = const PolarOfflineRecordingTrigger(
+  triggerMode: PolarOfflineRecordingTriggerMode.triggerDisabled,
+  triggerFeatures: {},
+);
+
+String offlineRecord(String entry) {
+  final type = PolarOfflineRecordingEntry.fromJson(jsonDecode(entry)).type;
+  final settings = type.supportsStreamSettings
+      ? PolarSensorSetting(const {PolarSettingType.sampleRate: 52})
+      : null;
+  return jsonEncode({
+    'type': type.toJson(),
+    'startTime': DateTime.timestamp().millisecondsSinceEpoch,
+    'settings': settings?.toJson(),
+    'data': sampleData(type).toJson(),
+  });
+}
 
 Future<dynamic> handleMethodCall(MethodCall call) async {
   switch (call.method) {
@@ -101,6 +136,54 @@ Future<dynamic> handleMethodCall(MethodCall call) async {
     case 'removeExercise':
       exercises.clear();
       return null;
+    case 'getAvailableOfflineRecordingDataTypes':
+      return jsonEncode(
+        offlineRecordingFeatures.map((e) => e.toJson()).toList(),
+      );
+    case 'requestOfflineRecordingSettings':
+    case 'requestFullOfflineRecordingSettings':
+      return jsonEncode(
+        PolarSensorSetting(const {PolarSettingType.sampleRate: 52}),
+      );
+    case 'getOfflineRecordingStatus':
+      return jsonEncode(offlineRecordings.map((e) => e.toJson()).toList());
+    case 'startOfflineRecording':
+      offlineRecordings.add(PolarDataType.fromJson(call.arguments[1]));
+      return null;
+    case 'stopOfflineRecording':
+      final type = PolarDataType.fromJson(call.arguments[1]);
+      offlineRecordings.remove(type);
+      offlineRecordingEntries.add(
+        PolarOfflineRecordingEntry(
+          path: '/U/0/${type.name}.REC',
+          size: 0,
+          date: DateTime.timestamp(),
+          type: type,
+        ),
+      );
+      return null;
+    case 'listOfflineRecordings':
+      return offlineRecordingEntries.map(jsonEncode).toList();
+    case 'getOfflineRecord':
+      return offlineRecord(call.arguments[1]);
+    case 'createOfflineRecordChannel':
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockStreamHandler(
+            EventChannel(call.arguments[0] as String),
+            OfflineRecordHandler(call.arguments[2]),
+          );
+      return null;
+    case 'removeOfflineRecord':
+      final path = jsonDecode(call.arguments[1])['path'];
+      offlineRecordingEntries.removeWhere((e) => e.path == path);
+      return null;
+    case 'setOfflineRecordingTrigger':
+      offlineRecordingTrigger = PolarOfflineRecordingTrigger.fromJson(
+        jsonDecode(call.arguments[1]),
+      );
+      return null;
+    case 'getOfflineRecordingTriggerSetup':
+      return jsonEncode(offlineRecordingTrigger);
     case 'setLedConfig':
       return null;
     case 'enableSdkMode':
@@ -197,123 +280,150 @@ class StreamingHandler extends MockStreamHandler {
 
   @override
   void onListen(dynamic arguments, MockStreamHandlerEventSink events) {
-    final PolarStreamingData data;
-    switch (type) {
-      case PolarDataType.ecg:
-        data = PolarEcgData(
-          samples: [
-            PolarEcgSample(timeStamp: DateTime.timestamp(), voltage: 0),
-          ],
-        );
-      case PolarDataType.acc:
-        data = PolarAccData(
-          samples: [
-            PolarAccSample(timeStamp: DateTime.timestamp(), x: 0, y: 0, z: 0),
-          ],
-        );
-      case PolarDataType.ppg:
-        data = PolarPpgData(
-          type: PpgDataType.ppg3_ambient1,
-          samples: [
-            PolarPpgSample(
-              timeStamp: DateTime.timestamp(),
-              channelSamples: const [],
-              statusBits: const [],
-            ),
-          ],
-        );
-      case PolarDataType.ppi:
-        data = const PolarPpiData(
-          samples: [
-            PolarPpiSample(
-              timeStamp: 0,
-              ppi: 0,
-              errorEstimate: 0,
-              hr: 0,
-              blockerBit: false,
-              skinContactStatus: false,
-              skinContactSupported: false,
-            ),
-          ],
-        );
-      case PolarDataType.gyro:
-        data = PolarGyroData(
-          samples: [
-            PolarGyroSample(timeStamp: DateTime.timestamp(), x: 0, y: 0, z: 0),
-          ],
-        );
-      case PolarDataType.magnetometer:
-        data = PolarMagnetometerData(
-          samples: [
-            PolarMagnetometerSample(
-              timeStamp: DateTime.timestamp(),
-              x: 0,
-              y: 0,
-              z: 0,
-            ),
-          ],
-        );
-      case PolarDataType.hr:
-        data = const PolarHrData(
-          samples: [
-            PolarHrSample(
-              hr: 0,
-              ppgQuality: 0,
-              correctedHr: 0,
-              rrsMs: [],
-              contactStatus: false,
-              contactStatusSupported: false,
-            ),
-          ],
-        );
-      case PolarDataType.temperature:
-        data = PolarTemperatureData(
-          samples: [
-            PolarTemperatureSample(
-              timeStamp: DateTime.timestamp(),
-              temperature: 0,
-            ),
-          ],
-        );
-      case PolarDataType.pressure:
-        data = PolarPressureData(
-          samples: [
-            PolarPressureSample(timeStamp: DateTime.timestamp(), pressure: 0),
-          ],
-        );
-      case PolarDataType.skinTemperature:
-        data = PolarTemperatureData(
-          samples: [
-            PolarTemperatureSample(
-              timeStamp: DateTime.timestamp(),
-              temperature: 0,
-            ),
-          ],
-        );
-      case PolarDataType.location:
-        data = PolarLocationData(
-          samples: [
-            PolarLocationDataSample(
-              timeStamp: DateTime.timestamp(),
-              latitude: 0,
-              longitude: 0,
-              time: '',
-              speed: 0,
-              cumulativeDistance: 0,
-              usedAccelerationSpeed: 0,
-              coordinateSpeed: 0,
-              accelerationSpeedFactor: 0,
-              course: 0,
-              gpsChipSpeed: 0,
-              fix: true,
-              speedFlag: 0,
-              fusionState: 0,
-            ),
-          ],
-        );
-    }
+    events.success(jsonEncode(sampleData(type)));
+  }
 
-    events.success(jsonEncode(data));
+  @override
+  void onCancel(dynamic arguments) {}
+}
+
+PolarStreamingData sampleData(PolarDataType type) {
+  final PolarStreamingData data;
+  switch (type) {
+    case PolarDataType.ecg:
+      data = PolarEcgData(
+        samples: [PolarEcgSample(timeStamp: DateTime.timestamp(), voltage: 0)],
+      );
+    case PolarDataType.acc:
+      data = PolarAccData(
+        samples: [
+          PolarAccSample(timeStamp: DateTime.timestamp(), x: 0, y: 0, z: 0),
+        ],
+      );
+    case PolarDataType.ppg:
+      data = PolarPpgData(
+        type: PpgDataType.ppg3_ambient1,
+        samples: [
+          PolarPpgSample(
+            timeStamp: DateTime.timestamp(),
+            channelSamples: const [],
+            statusBits: const [],
+          ),
+        ],
+      );
+    case PolarDataType.ppi:
+      data = const PolarPpiData(
+        samples: [
+          PolarPpiSample(
+            timeStamp: 0,
+            ppi: 0,
+            errorEstimate: 0,
+            hr: 0,
+            blockerBit: false,
+            skinContactStatus: false,
+            skinContactSupported: false,
+          ),
+        ],
+      );
+    case PolarDataType.gyro:
+      data = PolarGyroData(
+        samples: [
+          PolarGyroSample(timeStamp: DateTime.timestamp(), x: 0, y: 0, z: 0),
+        ],
+      );
+    case PolarDataType.magnetometer:
+      data = PolarMagnetometerData(
+        samples: [
+          PolarMagnetometerSample(
+            timeStamp: DateTime.timestamp(),
+            x: 0,
+            y: 0,
+            z: 0,
+          ),
+        ],
+      );
+    case PolarDataType.hr:
+      data = const PolarHrData(
+        samples: [
+          PolarHrSample(
+            hr: 0,
+            ppgQuality: 0,
+            correctedHr: 0,
+            rrsMs: [],
+            contactStatus: false,
+            contactStatusSupported: false,
+          ),
+        ],
+      );
+    case PolarDataType.temperature:
+      data = PolarTemperatureData(
+        samples: [
+          PolarTemperatureSample(
+            timeStamp: DateTime.timestamp(),
+            temperature: 0,
+          ),
+        ],
+      );
+    case PolarDataType.pressure:
+      data = PolarPressureData(
+        samples: [
+          PolarPressureSample(timeStamp: DateTime.timestamp(), pressure: 0),
+        ],
+      );
+    case PolarDataType.skinTemperature:
+      data = PolarTemperatureData(
+        samples: [
+          PolarTemperatureSample(
+            timeStamp: DateTime.timestamp(),
+            temperature: 0,
+          ),
+        ],
+      );
+    case PolarDataType.location:
+      data = PolarLocationData(
+        samples: [
+          PolarLocationDataSample(
+            timeStamp: DateTime.timestamp(),
+            latitude: 0,
+            longitude: 0,
+            time: '',
+            speed: 0,
+            cumulativeDistance: 0,
+            usedAccelerationSpeed: 0,
+            coordinateSpeed: 0,
+            accelerationSpeedFactor: 0,
+            course: 0,
+            gpsChipSpeed: 0,
+            fix: true,
+            speedFlag: 0,
+            fusionState: 0,
+          ),
+        ],
+      );
+  }
+
+  return data;
+}
+
+@immutable
+class OfflineRecordHandler extends MockStreamHandler {
+  final String entry;
+
+  const OfflineRecordHandler(this.entry);
+
+  @override
+  void onListen(dynamic arguments, MockStreamHandlerEventSink events) {
+    events.success(
+      jsonEncode(
+        const PolarOfflineRecordingProgress(
+          bytesDownloaded: 0,
+          totalBytes: 1,
+          progressPercent: 0,
+        ),
+      ),
+    );
+    events.success(jsonEncode({'complete': jsonDecode(offlineRecord(entry))}));
+    events.endOfStream();
   }
 
   @override

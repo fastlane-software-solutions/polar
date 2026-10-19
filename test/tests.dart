@@ -258,6 +258,111 @@ void testRecording(String identifier, {bool wait = true}) {
   });
 }
 
+void testOfflineRecording(
+  String identifier, {
+  required Set<PolarDataType> features,
+  Duration recordingDuration = const Duration(seconds: 30),
+}) {
+  group('offline recording', () {
+    setUpAll(() async {
+      await connect(identifier);
+      final available = await polar.getAvailableOfflineRecordingDataTypes(
+        identifier,
+      );
+      expect(available, unorderedEquals(features));
+    });
+
+    tearDownAll(() async {
+      await disconnect(identifier);
+    });
+
+    for (final feature in features) {
+      test(feature.name, () async {
+        //! Remove existing recordings of this type (THIS IS DESTRUCTIVE)
+        final entries1 = await polar.listOfflineRecordings(identifier);
+        for (final entry in entries1.where((e) => e.type == feature)) {
+          await polar.removeOfflineRecord(identifier, entry);
+        }
+
+        final status1 = await polar.getOfflineRecordingStatus(identifier);
+        expect(status1, isNot(contains(feature)));
+
+        await polar.startOfflineRecording(identifier, feature);
+
+        final status2 = await polar.getOfflineRecordingStatus(identifier);
+        expect(status2, contains(feature));
+
+        // Samples only exist after some recording time; there is no ready event
+        await Future.delayed(recordingDuration);
+        await polar.stopOfflineRecording(identifier, feature);
+
+        final status3 = await polar.getOfflineRecordingStatus(identifier);
+        expect(status3, isNot(contains(feature)));
+
+        final entries2 = await polar.listOfflineRecordings(identifier);
+        final entry = entries2.firstWhere((e) => e.type == feature);
+
+        final record = await polar.getOfflineRecord(identifier, entry);
+        expect(record.type, feature);
+        expect(record.data?.samples, isNotEmpty);
+
+        final results = await polar
+            .getOfflineRecordWithProgress(identifier, entry)
+            .toList();
+        final complete = results.last as PolarOfflineRecordingComplete;
+        expect(complete.data.type, feature);
+        expect(complete.data.data?.samples, isNotEmpty);
+
+        await polar.removeOfflineRecord(identifier, entry);
+
+        final entries3 = await polar.listOfflineRecordings(identifier);
+        expect(entries3.any((e) => e.path == entry.path), false);
+      });
+    }
+
+    test('trigger', () async {
+      final triggerFeatures = <PolarDataType, PolarSensorSetting?>{};
+      for (final feature in features) {
+        triggerFeatures[feature] = feature.supportsStreamSettings
+            ? (await polar.requestOfflineRecordingSettings(
+                identifier,
+                feature,
+              )).maxSettings()
+            : null;
+      }
+
+      await polar.setOfflineRecordingTrigger(
+        identifier,
+        PolarOfflineRecordingTrigger(
+          triggerMode: PolarOfflineRecordingTriggerMode.triggerSystemStart,
+          triggerFeatures: triggerFeatures,
+        ),
+      );
+
+      final setup1 = await polar.getOfflineRecordingTriggerSetup(identifier);
+      expect(
+        setup1.triggerMode,
+        PolarOfflineRecordingTriggerMode.triggerSystemStart,
+      );
+      expect(setup1.triggerFeatures.keys, unorderedEquals(features));
+
+      await polar.setOfflineRecordingTrigger(
+        identifier,
+        const PolarOfflineRecordingTrigger(
+          triggerMode: PolarOfflineRecordingTriggerMode.triggerDisabled,
+          triggerFeatures: {},
+        ),
+      );
+
+      final setup2 = await polar.getOfflineRecordingTriggerSetup(identifier);
+      expect(
+        setup2.triggerMode,
+        PolarOfflineRecordingTriggerMode.triggerDisabled,
+      );
+    });
+  });
+}
+
 void testSdkMode(String identifier) {
   test('sdk mode', () async {
     await connect(identifier);

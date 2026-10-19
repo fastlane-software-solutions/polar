@@ -1,3 +1,7 @@
+## 7.13.0
+
+- Adds offline recording support: `getAvailableOfflineRecordingDataTypes`, `requestOfflineRecordingSettings`, `requestFullOfflineRecordingSettings`, `getOfflineRecordingStatus`, `startOfflineRecording`, `stopOfflineRecording`, `listOfflineRecordings`, `getOfflineRecord`, `getOfflineRecordWithProgress`, `removeOfflineRecord`, `setOfflineRecordingTrigger`, and `getOfflineRecordingTriggerSetup`
+
 ## 7.12.0
 
 - Upgrades Polar SDK to `6.16.1` (by [@dcajal](https://github.com/dcajal) in [#77](https://github.com/Rexios80/polar/pull/77))

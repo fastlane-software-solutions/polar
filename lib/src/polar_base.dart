@@ -593,6 +593,297 @@ class Polar {
     ]);
   }
 
+  /// Get the data types available in this device for offline recording.
+  /// Requires `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  /// - Returns: Single stream
+  ///   - success: set of available offline recording data types in this device
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<Set<PolarDataType>> getAvailableOfflineRecordingDataTypes(
+    String identifier,
+  ) async {
+    final response = await _methodChannel.invokeMethod(
+      'getAvailableOfflineRecordingDataTypes',
+      identifier,
+    );
+    if (response == null) return {};
+    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+  }
+
+  /// Request the offline recording settings available in current operation
+  /// mode. This request shall be used before the offline recording is started
+  /// to decide currently available settings. The available settings depend on
+  /// the state of the device. Requires `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - feature: selected feature from `PolarDataType`
+  /// - Returns: Single stream
+  ///   - success: once after settings received from device
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<PolarSensorSetting> requestOfflineRecordingSettings(
+    String identifier,
+    PolarDataType feature,
+  ) async {
+    final response = await _methodChannel.invokeMethod(
+      'requestOfflineRecordingSettings',
+      [identifier, feature.toJson()],
+    );
+    return PolarSensorSetting.fromJson(jsonDecode(response));
+  }
+
+  /// Request all the settings available in the device. The request returns
+  /// all capabilities of the requested offline recording feature not
+  /// considering the current state of the device. Requires `offlineRecording`
+  /// feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - feature: selected feature from `PolarDataType`
+  /// - Returns: Single stream
+  ///   - success: once after full settings received from device
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<PolarSensorSetting> requestFullOfflineRecordingSettings(
+    String identifier,
+    PolarDataType feature,
+  ) async {
+    final response = await _methodChannel.invokeMethod(
+      'requestFullOfflineRecordingSettings',
+      [identifier, feature.toJson()],
+    );
+    return PolarSensorSetting.fromJson(jsonDecode(response));
+  }
+
+  /// Get the data types currently being recorded offline. Requires
+  /// `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  /// - Returns: Single stream
+  ///   - success: the data types with an offline recording in progress
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<Set<PolarDataType>> getOfflineRecordingStatus(
+    String identifier,
+  ) async {
+    final response = await _methodChannel.invokeMethod(
+      'getOfflineRecordingStatus',
+      identifier,
+    );
+    if (response == null) return {};
+    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+  }
+
+  /// Start offline recording. Requires `offlineRecording` feature.
+  ///
+  /// If [settings] is null for a data type that supports settings, the
+  /// maximum available settings from [requestOfflineRecordingSettings] are
+  /// used.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - feature: the data type to record
+  ///   - settings: the settings to record with
+  ///   - secret: if provided, the offline recording is encrypted in the
+  ///     device. The same secret must be provided to [getOfflineRecord].
+  /// - Returns: Completable stream
+  ///   - success: offline recording started
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<void> startOfflineRecording(
+    String identifier,
+    PolarDataType feature, {
+    PolarSensorSetting? settings,
+    PolarRecordingSecret? secret,
+  }) async {
+    assert(settings == null || settings.isSelection);
+
+    if (settings == null && feature.supportsStreamSettings) {
+      final availableSettings = await requestOfflineRecordingSettings(
+        identifier,
+        feature,
+      );
+      settings = availableSettings.maxSettings();
+    }
+
+    await _methodChannel.invokeMethod('startOfflineRecording', [
+      identifier,
+      feature.toJson(),
+      settings == null ? null : jsonEncode(settings),
+      secret?.key,
+    ]);
+  }
+
+  /// Stop offline recording. Requires `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - feature: the data type to stop recording
+  /// - Returns: Completable stream
+  ///   - success: offline recording stopped
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<void> stopOfflineRecording(String identifier, PolarDataType feature) {
+    return _methodChannel.invokeMethod('stopOfflineRecording', [
+      identifier,
+      feature.toJson(),
+    ]);
+  }
+
+  /// List the offline recordings stored in the device. Requires
+  /// `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  /// - Returns: Observable stream
+  ///   - onNext: see `PolarOfflineRecordingEntry`
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<List<PolarOfflineRecordingEntry>> listOfflineRecordings(
+    String identifier,
+  ) async {
+    final result = await _methodChannel.invokeListMethod(
+      'listOfflineRecordings',
+      identifier,
+    );
+    if (result == null) {
+      return [];
+    }
+    return result
+        .cast<String>()
+        .map((e) => PolarOfflineRecordingEntry.fromJson(jsonDecode(e)))
+        .toList();
+  }
+
+  /// Fetch an offline recording from the device. Requires `offlineRecording`
+  /// feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - entry: the offline recording to be fetched
+  ///   - secret: if the secret was provided to [startOfflineRecording] or
+  ///     [setOfflineRecordingTrigger], the same secret must be provided here
+  /// - Returns: Single stream
+  ///   - success: see `PolarOfflineRecordingData`
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<PolarOfflineRecordingData> getOfflineRecord(
+    String identifier,
+    PolarOfflineRecordingEntry entry, {
+    PolarRecordingSecret? secret,
+  }) async {
+    final result = await _methodChannel.invokeMethod('getOfflineRecord', [
+      identifier,
+      jsonEncode(entry),
+      secret?.key,
+    ]);
+    return PolarOfflineRecordingData.fromJson(jsonDecode(result));
+  }
+
+  static var _offlineRecordChannelCount = 0;
+
+  /// Fetch an offline recording from the device with progress updates.
+  /// Requires `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - entry: the offline recording to be fetched
+  ///   - secret: if the secret was provided to [startOfflineRecording] or
+  ///     [setOfflineRecordingTrigger], the same secret must be provided here
+  /// - Returns: Observable stream
+  ///   - onNext: [PolarOfflineRecordingProgress] while downloading, then a
+  ///     single [PolarOfflineRecordingComplete] with the recording data
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Stream<PolarOfflineRecordingResult> getOfflineRecordWithProgress(
+    String identifier,
+    PolarOfflineRecordingEntry entry, {
+    PolarRecordingSecret? secret,
+  }) async* {
+    final channelName =
+        'polar/offlineRecord/$identifier/${_offlineRecordChannelCount++}';
+
+    await _methodChannel.invokeMethod('createOfflineRecordChannel', [
+      channelName,
+      identifier,
+      jsonEncode(entry),
+      secret?.key,
+    ]);
+
+    yield* EventChannel(channelName)
+        .receiveBroadcastStream()
+        .cast<String>()
+        .map(jsonDecode)
+        .cast<Map<String, dynamic>>()
+        .map(PolarOfflineRecordingResult.fromJson);
+  }
+
+  /// Remove an offline recording from the device. Requires `offlineRecording`
+  /// feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - entry: the offline recording to be removed
+  /// - Returns: Completable stream
+  ///   - success: offline recording removed
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<void> removeOfflineRecord(
+    String identifier,
+    PolarOfflineRecordingEntry entry,
+  ) {
+    return _methodChannel.invokeMethod('removeOfflineRecord', [
+      identifier,
+      jsonEncode(entry),
+    ]);
+  }
+
+  /// Set the offline recording trigger. The offline recording automatically
+  /// starts when the trigger event happens. Requires `offlineRecording`
+  /// feature.
+  ///
+  /// An automatically started offline recording can be stopped by
+  /// [stopOfflineRecording]. If the user switches off the device, the offline
+  /// recording is stopped but starts again once the device is switched on and
+  /// the trigger event happens.
+  ///
+  /// Use [PolarOfflineRecordingTriggerMode.triggerDisabled] to disable the
+  /// trigger. An already running offline recording is not stopped by
+  /// disabling the trigger.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  ///   - trigger: the trigger to set
+  ///   - secret: if provided, the offline recordings are encrypted in the
+  ///     device. The same secret must be provided to [getOfflineRecord].
+  /// - Returns: Completable stream
+  ///   - success: the offline recording trigger was set
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<void> setOfflineRecordingTrigger(
+    String identifier,
+    PolarOfflineRecordingTrigger trigger, {
+    PolarRecordingSecret? secret,
+  }) {
+    return _methodChannel.invokeMethod('setOfflineRecordingTrigger', [
+      identifier,
+      jsonEncode(trigger),
+      secret?.key,
+    ]);
+  }
+
+  /// Get the current offline recording trigger setup in the device. Requires
+  /// `offlineRecording` feature.
+  ///
+  /// - Parameters:
+  ///   - identifier: polar device id
+  /// - Returns: Single stream
+  ///   - success: see `PolarOfflineRecordingTrigger`
+  ///   - onError: see `PolarErrors` for possible errors invoked
+  Future<PolarOfflineRecordingTrigger> getOfflineRecordingTriggerSetup(
+    String identifier,
+  ) async {
+    final result = await _methodChannel.invokeMethod(
+      'getOfflineRecordingTriggerSetup',
+      identifier,
+    );
+    return PolarOfflineRecordingTrigger.fromJson(jsonDecode(result));
+  }
+
   /// Set [LedConfig] to enable or disable blinking LEDs (Verity Sense 2.2.1+).
   ///
   /// - Parameters:
