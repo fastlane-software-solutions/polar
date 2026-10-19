@@ -473,3 +473,173 @@ class PolarFirstTimeUseConfigCodable: Decodable {
     case sleepGoalMinutes
   }
 }
+
+class PolarOfflineRecordingEntryCodable: Codable {
+  let data: PolarOfflineRecordingEntry
+
+  init(_ data: PolarOfflineRecordingEntry) {
+    self.data = data
+  }
+
+  required init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    data = PolarOfflineRecordingEntry(
+      path: try container.decode(String.self, forKey: .path),
+      size: try container.decode(UInt.self, forKey: .size),
+      date: Date(milliseconds: try container.decode(Int64.self, forKey: .date)),
+      type: PolarDeviceDataType.allCases[try container.decode(Int.self, forKey: .type)]
+    )
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case path
+    case size
+    case date
+    case type
+  }
+
+  func encode(to encoder: Encoder) {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try? container.encode(data.path, forKey: .path)
+    try? container.encode(data.size, forKey: .size)
+    try? container.encode(data.date.millisecondsSince1970, forKey: .date)
+    try? container.encode(
+      PolarDeviceDataType.allCases.firstIndex(of: data.type)!, forKey: .type)
+  }
+}
+
+class PolarOfflineRecordingDataCodable: Encodable {
+  let data: PolarOfflineRecordingData
+
+  init(_ data: PolarOfflineRecordingData) {
+    self.data = data
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case type
+    case startTime
+    case settings
+    case data
+  }
+
+  func encode(to encoder: Encoder) {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+
+    let type: PolarDeviceDataType?
+    let startTime: Date
+    var settings: PolarSensorSetting? = nil
+    let samples: Encodable?
+    switch data {
+    case .accOfflineRecordingData(let data, let start, let setting):
+      (type, startTime, settings, samples) = (.acc, start, setting, PolarDataCodable(data))
+    case .gyroOfflineRecordingData(let data, let start, let setting):
+      (type, startTime, settings, samples) = (.gyro, start, setting, PolarDataCodable(data))
+    case .magOfflineRecordingData(let data, let start, let setting):
+      (type, startTime, settings, samples) = (
+        .magnetometer, start, setting, PolarDataCodable(data)
+      )
+    case .ppgOfflineRecordingData(let data, let start, let setting):
+      (type, startTime, settings, samples) = (.ppg, start, setting, PolarDataCodable(data))
+    case .ppiOfflineRecordingData(let data, let start):
+      (type, startTime, samples) = (.ppi, start, PolarDataCodable(data))
+    case .hrOfflineRecordingData(let data, let start):
+      (type, startTime, samples) = (.hr, start, PolarDataCodable(data))
+    case .temperatureOfflineRecordingData(let data, let start):
+      (type, startTime, samples) = (.temperature, start, PolarDataCodable(data))
+    case .skinTemperatureOfflineRecordingData(let data, let start):
+      (type, startTime, samples) = (.skinTemperature, start, PolarDataCodable(data))
+    case .emptyData(let start):
+      (type, startTime, samples) = (nil, start, nil)
+    }
+
+    try? container.encode(
+      type.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! }, forKey: .type)
+    try? container.encode(startTime.millisecondsSince1970, forKey: .startTime)
+    try? container.encode(settings.map(PolarSensorSettingCodable.init), forKey: .settings)
+    try? container.encode(samples.map(EncodableWrapper.init), forKey: .data)
+  }
+}
+
+class PolarOfflineRecordingResultCodable: Encodable {
+  let data: PolarOfflineRecordingResult
+
+  init(_ data: PolarOfflineRecordingResult) {
+    self.data = data
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case progress
+    case complete
+  }
+
+  enum ProgressCodingKeys: String, CodingKey {
+    case bytesDownloaded
+    case totalBytes
+    case progressPercent
+  }
+
+  func encode(to encoder: Encoder) {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    switch data {
+    case .progress(let progress):
+      var progressContainer = container.nestedContainer(
+        keyedBy: ProgressCodingKeys.self, forKey: .progress)
+      try? progressContainer.encode(progress.bytesDownloaded, forKey: .bytesDownloaded)
+      try? progressContainer.encode(progress.totalBytes, forKey: .totalBytes)
+      try? progressContainer.encode(progress.progressPercent, forKey: .progressPercent)
+    case .complete(let data):
+      try? container.encode(PolarOfflineRecordingDataCodable(data), forKey: .complete)
+    }
+  }
+}
+
+private let triggerModes: [PolarOfflineRecordingTriggerMode] = [
+  .triggerDisabled, .triggerSystemStart, .triggerExerciseStart,
+]
+
+class PolarOfflineRecordingTriggerCodable: Codable {
+  let data: PolarOfflineRecordingTrigger
+
+  init(_ data: PolarOfflineRecordingTrigger) {
+    self.data = data
+  }
+
+  struct TriggerFeature: Codable {
+    let type: Int
+    let settings: PolarSensorSettingCodable?
+  }
+
+  required init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let mode = triggerModes[try container.decode(Int.self, forKey: .triggerMode)]
+    let features = try container.decode([TriggerFeature].self, forKey: .triggerFeatures)
+
+    data = PolarOfflineRecordingTrigger(
+      triggerMode: mode,
+      triggerFeatures: Dictionary(
+        uniqueKeysWithValues: features.map {
+          (PolarDeviceDataType.allCases[$0.type], $0.settings?.data)
+        }
+      )
+    )
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case triggerMode
+    case triggerFeatures
+  }
+
+  func encode(to encoder: Encoder) {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try? container.encode(triggerModes.firstIndex(of: data.triggerMode)!, forKey: .triggerMode)
+    try? container.encode(
+      data.triggerFeatures.map { type, settings in
+        TriggerFeature(
+          type: PolarDeviceDataType.allCases.firstIndex(of: type)!,
+          settings: settings.map(PolarSensorSettingCodable.init)
+        )
+      },
+      forKey: .triggerFeatures
+    )
+  }
+}

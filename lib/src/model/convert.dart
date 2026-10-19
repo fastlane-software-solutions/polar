@@ -26,6 +26,28 @@ Map<String, dynamic> writePlatformValue(
   return {key: value};
 }
 
+/// Decode an SDK enum value
+/// - The iOS SDK uses the index
+/// - The Android SDK uses the SCREAMING_SNAKE_CASE name
+T platformEnumFromJson<T extends Enum>(List<T> values, dynamic json) {
+  if (Platform.isIOS) {
+    return values[json as int];
+  } else {
+    // This is android
+    return values.byName((json as String).camelCase);
+  }
+}
+
+/// Encode an SDK enum value. See [platformEnumFromJson].
+dynamic platformEnumToJson(Enum value) {
+  if (Platform.isIOS) {
+    return value.index;
+  } else {
+    // This is android
+    return value.name.snakeCase.toUpperCase();
+  }
+}
+
 /// Converts platform values to booleans
 /// - The iOS SDK uses `0` and `1` for booleans
 /// - The Android SDK uses `true` and `false` for booleans
@@ -107,24 +129,14 @@ class PolarSettingTypeConverter
   const PolarSettingTypeConverter();
 
   @override
-  PolarSettingType fromJson(String json) {
-    if (Platform.isIOS) {
-      return PolarSettingType.values[int.parse(json)];
-    } else {
-      // This is android
-      return PolarSettingType.values.byName(json.camelCase);
-    }
-  }
+  PolarSettingType fromJson(String json) => platformEnumFromJson(
+    PolarSettingType.values,
+    Platform.isIOS ? int.parse(json) : json,
+  );
 
   @override
-  String toJson(PolarSettingType object) {
-    if (Platform.isIOS) {
-      return object.index.toString();
-    } else {
-      // This is android
-      return object.name.snakeCase.toUpperCase();
-    }
-  }
+  String toJson(PolarSettingType object) =>
+      platformEnumToJson(object).toString();
 }
 
 final _polarEpoch = DateTime(2000).microsecondsSinceEpoch;

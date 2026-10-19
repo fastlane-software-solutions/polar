@@ -23,6 +23,7 @@ class _MyAppState extends State<MyApp> {
   final logs = ['Service started'];
 
   PolarExerciseEntry? exerciseEntry;
+  PolarOfflineRecordingEntry? offlineRecordingEntry;
 
   @override
   void initState() {
@@ -50,6 +51,13 @@ class _MyAppState extends State<MyApp> {
                   .map((e) => PopupMenuItem(value: e, child: Text(e.name)))
                   .toList(),
               onSelected: handleRecordingAction,
+            ),
+            PopupMenuButton(
+              icon: const Icon(Icons.save),
+              itemBuilder: (context) => OfflineRecordingAction.values
+                  .map((e) => PopupMenuItem(value: e, child: Text(e.name)))
+                  .toList(),
+              onSelected: handleOfflineRecordingAction,
             ),
             IconButton(
               icon: const Icon(Icons.stop),
@@ -171,6 +179,105 @@ class _MyAppState extends State<MyApp> {
         break;
     }
   }
+
+  Future<void> handleOfflineRecordingAction(
+    OfflineRecordingAction action,
+  ) async {
+    const type = PolarDataType.ppi;
+    switch (action) {
+      case OfflineRecordingAction.start:
+        log('Starting offline recording');
+        await polar.startOfflineRecording(identifier, type);
+        log('Started offline recording');
+        break;
+      case OfflineRecordingAction.stop:
+        log('Stopping offline recording');
+        await polar.stopOfflineRecording(identifier, type);
+        log('Stopped offline recording');
+        break;
+      case OfflineRecordingAction.status:
+        log('Getting offline recording status');
+        final status = await polar.getOfflineRecordingStatus(identifier);
+        log('Offline recording status: $status');
+        break;
+      case OfflineRecordingAction.list:
+        log('Listing offline recordings');
+        final entries = await polar.listOfflineRecordings(identifier);
+        log('Offline recordings: $entries');
+        final typeEntries = entries.where((e) => e.type == type);
+        offlineRecordingEntry = typeEntries.isEmpty ? null : typeEntries.first;
+        break;
+      case OfflineRecordingAction.fetch:
+        log('Fetching offline recording');
+        final entry = offlineRecordingEntry;
+        if (entry == null) {
+          log('Offline recordings not yet listed');
+          return;
+        }
+        await for (final result in polar.getOfflineRecordWithProgress(
+          identifier,
+          entry,
+        )) {
+          if (result is PolarOfflineRecordingProgress) {
+            log('Fetching offline recording: ${result.progressPercent}%');
+          } else if (result is PolarOfflineRecordingComplete) {
+            final samples = result.data.data?.samples.length;
+            log('Fetched offline recording: $samples samples');
+          }
+        }
+        break;
+      case OfflineRecordingAction.remove:
+        log('Removing offline recording');
+        final entry = offlineRecordingEntry;
+        if (entry == null) {
+          log('No offline recording to remove. Try calling list first.');
+          return;
+        }
+        await polar.removeOfflineRecord(identifier, entry);
+        offlineRecordingEntry = null;
+        log('Removed offline recording');
+        break;
+      case OfflineRecordingAction.setTrigger:
+        log('Setting offline recording trigger');
+        await polar.setOfflineRecordingTrigger(
+          identifier,
+          const PolarOfflineRecordingTrigger(
+            triggerMode: PolarOfflineRecordingTriggerMode.triggerSystemStart,
+            triggerFeatures: {type: null},
+          ),
+        );
+        log('Set offline recording trigger');
+        break;
+      case OfflineRecordingAction.getTrigger:
+        log('Getting offline recording trigger');
+        final trigger = await polar.getOfflineRecordingTriggerSetup(identifier);
+        log('Offline recording trigger: $trigger');
+        break;
+      case OfflineRecordingAction.disableTrigger:
+        log('Disabling offline recording trigger');
+        await polar.setOfflineRecordingTrigger(
+          identifier,
+          const PolarOfflineRecordingTrigger(
+            triggerMode: PolarOfflineRecordingTriggerMode.triggerDisabled,
+            triggerFeatures: {},
+          ),
+        );
+        log('Disabled offline recording trigger');
+        break;
+    }
+  }
+}
+
+enum OfflineRecordingAction {
+  start,
+  stop,
+  status,
+  list,
+  fetch,
+  remove,
+  setTrigger,
+  getTrigger,
+  disableTrigger,
 }
 
 enum RecordingAction {

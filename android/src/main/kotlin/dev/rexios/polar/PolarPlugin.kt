@@ -6,9 +6,12 @@ import android.os.Looper
 import androidx.lifecycle.Lifecycle.Event
 import androidx.lifecycle.LifecycleEventObserver
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
 import com.google.gson.JsonDeserializationContext
 import com.google.gson.JsonDeserializer
 import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import com.google.gson.JsonSerializationContext
 import com.google.gson.JsonSerializer
@@ -28,6 +31,12 @@ import com.polar.sdk.api.model.PolarExerciseEntry
 import com.polar.sdk.api.model.PolarFirstTimeUseConfig
 import com.polar.sdk.api.model.PolarHealthThermometerData
 import com.polar.sdk.api.model.PolarHrData
+import com.polar.sdk.api.model.PolarOfflineRecordingData
+import com.polar.sdk.api.model.PolarOfflineRecordingEntry
+import com.polar.sdk.api.model.PolarOfflineRecordingResult
+import com.polar.sdk.api.model.PolarOfflineRecordingTrigger
+import com.polar.sdk.api.model.PolarOfflineRecordingTriggerMode
+import com.polar.sdk.api.model.PolarRecordingSecret
 import com.polar.sdk.api.model.PolarSensorSetting
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -40,16 +49,23 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import io.reactivex.rxjava3.core.Completable
+import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.Disposable
+import java.io.StringWriter
 import java.lang.reflect.Type
 import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.UUID
 
 fun Any?.discard() = Unit
 
-object LocalDateTimeSerializer : JsonDeserializer<LocalDateTime>, JsonSerializer<LocalDateTime> {
+class LocalDateTimeSerializer(
+    private val zone: ZoneId,
+) : JsonDeserializer<LocalDateTime>,
+    JsonSerializer<LocalDateTime> {
     override fun deserialize(
         json: JsonElement?,
         typeOfT: Type?,
@@ -57,7 +73,7 @@ object LocalDateTimeSerializer : JsonDeserializer<LocalDateTime>, JsonSerializer
     ): LocalDateTime =
         Instant
             .ofEpochMilli(json?.asJsonPrimitive?.asLong ?: 0)
-            .atZone(ZoneOffset.UTC)
+            .atZone(zone)
             .toLocalDateTime()
 
     override fun serialize(
@@ -66,7 +82,7 @@ object LocalDateTimeSerializer : JsonDeserializer<LocalDateTime>, JsonSerializer
         context: JsonSerializationContext?,
     ): JsonElement =
         JsonPrimitive(
-            src?.toInstant(ZoneOffset.UTC)?.toEpochMilli() ?: 0,
+            src?.atZone(zone)?.toInstant()?.toEpochMilli() ?: 0,
         )
 }
 
@@ -76,8 +92,107 @@ private fun runOnUiThread(runnable: () -> Unit) {
 
 private val gson =
     GsonBuilder()
-        .registerTypeAdapter(LocalDateTime::class.java, LocalDateTimeSerializer)
+        .registerTypeAdapter(LocalDateTime::class.java, LocalDateTimeSerializer(ZoneOffset.UTC))
         .create()
+
+// Offline recording dates are in the device's local time, which it gets from
+// the phone. Interpret them in the phone's time zone to match iOS.
+private val offlineGson =
+    gson
+        .newBuilder()
+        .registerTypeAdapter(LocalDateTime::class.java, LocalDateTimeSerializer(ZoneId.systemDefault()))
+        .create()
+
+private fun <T : Any> Single<T>.reply(
+    result: Result,
+    map: (T) -> Any? = { gson.toJson(it) },
+) {
+    subscribe({
+        val value = map(it)
+        runOnUiThread { result.success(value) }
+    }, {
+        runOnUiThread { result.error(it.toString(), it.message, null) }
+    }).discard()
+}
+
+private fun Completable.reply(result: Result) {
+    subscribe({
+        runOnUiThread { result.success(null) }
+    }, {
+        runOnUiThread { result.error(it.toString(), it.message, null) }
+    }).discard()
+}
+
+private fun recordingSecret(key: Any?): PolarRecordingSecret? = (key as ByteArray?)?.let { PolarRecordingSecret(it) }
+
+// Write straight to the output instead of building a JsonElement tree, since
+// recordings can be very large
+private fun offlineRecordingDataToJson(recording: PolarOfflineRecordingData): String {
+    val (type, data) =
+        when (recording) {
+            is PolarOfflineRecordingData.AccOfflineRecording -> PolarDeviceDataType.ACC to recording.data
+            is PolarOfflineRecordingData.GyroOfflineRecording -> PolarDeviceDataType.GYRO to recording.data
+            is PolarOfflineRecordingData.MagOfflineRecording -> PolarDeviceDataType.MAGNETOMETER to recording.data
+            is PolarOfflineRecordingData.PpgOfflineRecording -> PolarDeviceDataType.PPG to recording.data
+            is PolarOfflineRecordingData.PpiOfflineRecording -> PolarDeviceDataType.PPI to recording.data
+            is PolarOfflineRecordingData.HrOfflineRecording -> PolarDeviceDataType.HR to recording.data
+            is PolarOfflineRecordingData.TemperatureOfflineRecording -> PolarDeviceDataType.TEMPERATURE to recording.data
+            is PolarOfflineRecordingData.SkinTemperatureOfflineRecording -> PolarDeviceDataType.SKIN_TEMPERATURE to recording.data
+        }
+
+    val output = StringWriter()
+    offlineGson.newJsonWriter(output).use { writer ->
+        writer.beginObject()
+        writer.name("type")
+        offlineGson.toJson(type, PolarDeviceDataType::class.java, writer)
+        writer.name("startTime")
+        offlineGson.toJson(recording.startTime, LocalDateTime::class.java, writer)
+        recording.settings?.let {
+            writer.name("settings")
+            offlineGson.toJson(it, PolarSensorSetting::class.java, writer)
+        }
+        writer.name("data")
+        offlineGson.toJson(data, data.javaClass, writer)
+        writer.endObject()
+    }
+    return output.toString()
+}
+
+private fun offlineRecordingTriggerToJson(trigger: PolarOfflineRecordingTrigger): JsonObject {
+    val features = JsonArray()
+    trigger.triggerFeatures.forEach { (type, settings) ->
+        features.add(
+            JsonObject().apply {
+                add("type", gson.toJsonTree(type))
+                add("settings", settings?.let { gson.toJsonTree(it) })
+            },
+        )
+    }
+
+    return JsonObject().apply {
+        add("triggerMode", gson.toJsonTree(trigger.triggerMode))
+        add("triggerFeatures", features)
+    }
+}
+
+private fun offlineRecordingTriggerFromJson(json: String): PolarOfflineRecordingTrigger {
+    val trigger = JsonParser.parseString(json).asJsonObject
+    val features =
+        trigger["triggerFeatures"].asJsonArray.associate {
+            val feature = it.asJsonObject
+            val type = gson.fromJson(feature["type"], PolarDeviceDataType::class.java)
+            val settings =
+                feature["settings"]
+                    ?.takeUnless { settings -> settings.isJsonNull }
+                    ?.let { settings -> gson.fromJson(settings, PolarSensorSetting::class.java) }
+            type to settings
+        }
+
+    return PolarOfflineRecordingTrigger(
+        gson.fromJson(trigger["triggerMode"], PolarOfflineRecordingTriggerMode::class.java),
+        features,
+    )
+}
 
 private var wrapperInternal: PolarWrapper? = null
 private val wrapper: PolarWrapper
@@ -107,6 +222,9 @@ class PolarPlugin :
     // Streaming channels
     private val streamingChannels = mutableMapOf<String, StreamingChannel>()
 
+    // Offline record channels
+    private val offlineRecordChannels = mutableMapOf<String, OfflineRecordChannel>()
+
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         messenger = flutterPluginBinding.binaryMessenger
 
@@ -127,6 +245,7 @@ class PolarPlugin :
         eventChannel.setStreamHandler(null)
         searchChannel.setStreamHandler(null)
         streamingChannels.values.forEach { it.dispose() }
+        offlineRecordChannels.values.forEach { it.dispose() }
         shutDown()
     }
 
@@ -196,6 +315,58 @@ class PolarPlugin :
 
             "removeExercise" -> {
                 removeExercise(call, result)
+            }
+
+            "getAvailableOfflineRecordingDataTypes" -> {
+                getAvailableOfflineRecordingDataTypes(call, result)
+            }
+
+            "requestOfflineRecordingSettings" -> {
+                requestOfflineRecordingSettings(call, result)
+            }
+
+            "requestFullOfflineRecordingSettings" -> {
+                requestFullOfflineRecordingSettings(call, result)
+            }
+
+            "getOfflineRecordingStatus" -> {
+                getOfflineRecordingStatus(call, result)
+            }
+
+            "startOfflineRecording" -> {
+                startOfflineRecording(call, result)
+            }
+
+            "stopOfflineRecording" -> {
+                stopOfflineRecording(call, result)
+            }
+
+            "listOfflineRecordings" -> {
+                listOfflineRecordings(call, result)
+            }
+
+            "getOfflineRecord" -> {
+                getOfflineRecord(call, result)
+            }
+
+            "createOfflineRecordChannel" -> {
+                createOfflineRecordChannel(call, result)
+            }
+
+            "disposeOfflineRecordChannel" -> {
+                disposeOfflineRecordChannel(call, result)
+            }
+
+            "removeOfflineRecord" -> {
+                removeOfflineRecord(call, result)
+            }
+
+            "setOfflineRecordingTrigger" -> {
+                setOfflineRecordingTrigger(call, result)
+            }
+
+            "getOfflineRecordingTriggerSetup" -> {
+                getOfflineRecordingTriggerSetup(call, result)
             }
 
             "setLedConfig" -> {
@@ -322,6 +493,8 @@ class PolarPlugin :
     private fun shutDown() {
         streamingChannels.values.forEach { it.dispose() }
         streamingChannels.clear()
+        offlineRecordChannels.values.forEach { it.dispose() }
+        offlineRecordChannels.clear()
         searchHandler.dispose()
         if (wrapperInternal != null) {
             try {
@@ -505,6 +678,168 @@ class PolarPlugin :
                 }
             })
             .discard()
+    }
+
+    private fun getAvailableOfflineRecordingDataTypes(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val identifier = call.arguments as String
+
+        wrapper.api.getAvailableOfflineRecordingDataTypes(identifier).reply(result)
+    }
+
+    private fun requestOfflineRecordingSettings(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val feature = gson.fromJson(arguments[1] as String, PolarDeviceDataType::class.java)
+
+        wrapper.api.requestOfflineRecordingSettings(identifier, feature).reply(result)
+    }
+
+    private fun requestFullOfflineRecordingSettings(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val feature = gson.fromJson(arguments[1] as String, PolarDeviceDataType::class.java)
+
+        wrapper.api.requestFullOfflineRecordingSettings(identifier, feature).reply(result)
+    }
+
+    private fun getOfflineRecordingStatus(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val identifier = call.arguments as String
+
+        wrapper.api.getOfflineRecordingStatus(identifier).reply(result)
+    }
+
+    private fun startOfflineRecording(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val feature = gson.fromJson(arguments[1] as String, PolarDeviceDataType::class.java)
+        val settings = (arguments[2] as String?)?.let { gson.fromJson(it, PolarSensorSetting::class.java) }
+        val secret = recordingSecret(arguments[3])
+
+        wrapper.api.startOfflineRecording(identifier, feature, settings, secret).reply(result)
+    }
+
+    private fun stopOfflineRecording(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val feature = gson.fromJson(arguments[1] as String, PolarDeviceDataType::class.java)
+
+        wrapper.api.stopOfflineRecording(identifier, feature).reply(result)
+    }
+
+    private fun listOfflineRecordings(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val identifier = call.arguments as String
+
+        wrapper.api
+            .listOfflineRecordings(identifier)
+            .map { offlineGson.toJson(it) }
+            .toList()
+            .reply(result) { it }
+    }
+
+    private fun getOfflineRecord(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val entry = offlineGson.fromJson(arguments[1] as String, PolarOfflineRecordingEntry::class.java)
+        val secret = recordingSecret(arguments[2])
+
+        wrapper.api.getOfflineRecord(identifier, entry, secret).reply(result, ::offlineRecordingDataToJson)
+    }
+
+    private fun createOfflineRecordChannel(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val name = arguments[0] as String
+        val identifier = arguments[1] as String
+        val entry = offlineGson.fromJson(arguments[2] as String, PolarOfflineRecordingEntry::class.java)
+        val secret = recordingSecret(arguments[3])
+
+        // A channel with the same name is left over from before a hot restart
+        offlineRecordChannels.remove(name)?.dispose()
+
+        lateinit var channel: OfflineRecordChannel
+        channel =
+            OfflineRecordChannel(
+                messenger,
+                name,
+                wrapper.api,
+                identifier,
+                entry,
+                secret,
+                onDispose = { offlineRecordChannels.remove(name, channel).discard() },
+            )
+        offlineRecordChannels[name] = channel
+
+        result.success(null)
+    }
+
+    private fun disposeOfflineRecordChannel(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val name = call.arguments as String
+
+        offlineRecordChannels.remove(name)?.dispose()
+        result.success(null)
+    }
+
+    private fun removeOfflineRecord(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val entry = offlineGson.fromJson(arguments[1] as String, PolarOfflineRecordingEntry::class.java)
+
+        wrapper.api.removeOfflineRecord(identifier, entry).reply(result)
+    }
+
+    private fun setOfflineRecordingTrigger(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val arguments = call.arguments as List<*>
+        val identifier = arguments[0] as String
+        val trigger = offlineRecordingTriggerFromJson(arguments[1] as String)
+        val secret = recordingSecret(arguments[2])
+
+        wrapper.api.setOfflineRecordingTrigger(identifier, trigger, secret).reply(result)
+    }
+
+    private fun getOfflineRecordingTriggerSetup(
+        call: MethodCall,
+        result: Result,
+    ) {
+        val identifier = call.arguments as String
+
+        wrapper.api.getOfflineRecordingTriggerSetup(identifier).reply(result) {
+            gson.toJson(offlineRecordingTriggerToJson(it))
+        }
     }
 
     private fun setLedConfig(
@@ -861,6 +1196,60 @@ class StreamingChannel(
 
     override fun onCancel(arguments: Any?) {
         subscription?.dispose()
+    }
+
+    fun dispose() {
+        subscription?.dispose()
+        channel.setStreamHandler(null)
+    }
+}
+
+class OfflineRecordChannel(
+    messenger: BinaryMessenger,
+    name: String,
+    private val api: PolarBleApi,
+    private val identifier: String,
+    private val entry: PolarOfflineRecordingEntry,
+    private val secret: PolarRecordingSecret?,
+    private val onDispose: () -> Unit,
+    private val channel: EventChannel = EventChannel(messenger, name),
+) : EventChannel.StreamHandler {
+    private var subscription: Disposable? = null
+
+    init {
+        channel.setStreamHandler(this)
+    }
+
+    override fun onListen(
+        arguments: Any?,
+        events: EventSink,
+    ) {
+        subscription =
+            api.getOfflineRecordWithProgress(identifier, entry, secret).subscribe({
+                val json =
+                    when (it) {
+                        is PolarOfflineRecordingResult.Progress -> "{\"progress\":${gson.toJson(it)}}"
+                        is PolarOfflineRecordingResult.Complete -> "{\"complete\":${offlineRecordingDataToJson(it.data)}}"
+                    }
+                runOnUiThread { events.success(json) }
+            }, {
+                runOnUiThread {
+                    events.error(it.toString(), it.message, null)
+                    // The download can't continue. Ending the stream makes Dart
+                    // cancel it, which disposes the channel.
+                    events.endOfStream()
+                }
+            }, {
+                runOnUiThread { events.endOfStream() }
+            })
+    }
+
+    override fun onCancel(arguments: Any?) {
+        // The channel is single use
+        runOnUiThread {
+            dispose()
+            onDispose()
+        }
     }
 
     fun dispose() {
