@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
@@ -49,6 +50,7 @@ void main() {
     features: offlineRecordingFeatures,
     recordingDuration: Duration.zero,
   );
+  testOfflineRecordChannelLifecycle();
   testSdkMode(identifier);
   testMisc(identifier, supportsLedConfig: true);
   testFtu(identifier);
@@ -72,6 +74,11 @@ const offlineRecordingFeatures = {
 };
 final offlineRecordings = <PolarDataType>{};
 final offlineRecordingEntries = <PolarOfflineRecordingEntry>[];
+final createdOfflineRecordChannels = <String>[];
+final listenedOfflineRecordChannels = <String>[];
+final cancelledOfflineRecordChannels = <String>[];
+final disposedOfflineRecordChannels = <String>[];
+var failOfflineRecord = false;
 var offlineRecordingTrigger = const PolarOfflineRecordingTrigger(
   triggerMode: PolarOfflineRecordingTriggerMode.triggerDisabled,
   triggerFeatures: {},
@@ -167,11 +174,19 @@ Future<dynamic> handleMethodCall(MethodCall call) async {
     case 'getOfflineRecord':
       return offlineRecord(call.arguments[1]);
     case 'createOfflineRecordChannel':
+      final name = call.arguments[0] as String;
+      createdOfflineRecordChannels.add(name);
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockStreamHandler(
-            EventChannel(call.arguments[0] as String),
-            OfflineRecordHandler(call.arguments[2]),
+            EventChannel(name),
+            OfflineRecordHandler(name, call.arguments[2]),
           );
+      return null;
+    case 'disposeOfflineRecordChannel':
+      final name = call.arguments as String;
+      disposedOfflineRecordChannels.add(name);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockStreamHandler(EventChannel(name), null);
       return null;
     case 'removeOfflineRecord':
       final path = jsonDecode(call.arguments[1])['path'];
@@ -407,12 +422,14 @@ PolarStreamingData sampleData(PolarDataType type) {
 
 @immutable
 class OfflineRecordHandler extends MockStreamHandler {
+  final String name;
   final String entry;
 
-  const OfflineRecordHandler(this.entry);
+  const OfflineRecordHandler(this.name, this.entry);
 
   @override
   void onListen(dynamic arguments, MockStreamHandlerEventSink events) {
+    listenedOfflineRecordChannels.add(name);
     events.success(
       jsonEncode(
         const PolarOfflineRecordingProgress(
@@ -422,10 +439,61 @@ class OfflineRecordHandler extends MockStreamHandler {
         ),
       ),
     );
+    if (failOfflineRecord) {
+      // Mirrors the native plugins, which end the stream after an error
+      events.error(code: 'Error fetching offline recording');
+      events.endOfStream();
+      return;
+    }
     events.success(jsonEncode({'complete': jsonDecode(offlineRecord(entry))}));
     events.endOfStream();
   }
 
   @override
-  void onCancel(dynamic arguments) {}
+  void onCancel(dynamic arguments) {
+    cancelledOfflineRecordChannels.add(name);
+  }
+}
+
+void testOfflineRecordChannelLifecycle() {
+  group('offline record channel lifecycle', () {
+    final entry = PolarOfflineRecordingEntry(
+      path: '/U/0/20260101/R/100000/ACC.REC',
+      size: 0,
+      date: DateTime.timestamp(),
+      type: PolarDataType.acc,
+    );
+
+    tearDown(() => failOfflineRecord = false);
+
+    test('cancelled before listening', () async {
+      final subscription = polar
+          .getOfflineRecordWithProgress(identifier, entry)
+          .listen(null);
+      await subscription.cancel();
+
+      final name = createdOfflineRecordChannels.last;
+      expect(listenedOfflineRecordChannels, isNot(contains(name)));
+      expect(disposedOfflineRecordChannels, contains(name));
+    });
+
+    test('download error', () async {
+      failOfflineRecord = true;
+
+      final events = <Object>[];
+      final done = Completer<void>();
+      polar
+          .getOfflineRecordWithProgress(identifier, entry)
+          .listen(events.add, onError: events.add, onDone: done.complete);
+      await done.future;
+
+      expect(events.first, isA<PolarOfflineRecordingProgress>());
+      expect(events.last, isA<PlatformException>());
+
+      final name = createdOfflineRecordChannels.last;
+      // Native disposes the channel when Dart cancels it
+      expect(cancelledOfflineRecordChannels, contains(name));
+      expect(disposedOfflineRecordChannels, contains(name));
+    });
+  });
 }

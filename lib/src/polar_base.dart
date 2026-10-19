@@ -3,11 +3,33 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/services.dart';
 import 'package:meta/meta.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:polar/polar.dart';
 import 'package:polar/src/model/polar_event_wrapper.dart';
+
+Set<PolarDataType> _decodeDataTypes(String? response) {
+  if (response == null) return {};
+  return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+}
+
+/// Offline recordings can be many megabytes of JSON. Decode them off the UI
+/// isolate, but keep small payloads (e.g. progress updates) on it since
+/// spawning an isolate costs more than decoding them.
+const _isolateDecodeThreshold = 64 * 1024;
+
+Future<T> _decodeLarge<T>(String json, T Function(String json) decode) {
+  if (json.length < _isolateDecodeThreshold) return Future.value(decode(json));
+  return compute(decode, json);
+}
+
+PolarOfflineRecordingData _decodeOfflineRecordingData(String json) =>
+    PolarOfflineRecordingData.fromJson(jsonDecode(json));
+
+PolarOfflineRecordingResult _decodeOfflineRecordingResult(String json) =>
+    PolarOfflineRecordingResult.fromJson(jsonDecode(json));
 
 /// Flutter implementation of the [PolarBleSdk]
 @immutable
@@ -209,8 +231,7 @@ class Polar {
       'getAvailableOnlineStreamDataTypes',
       identifier,
     );
-    if (response == null) return {};
-    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+    return _decodeDataTypes(response);
   }
 
   ///  Find out if the HR service is available in the device. Use this API method in a case where the device does not support Polar Measurement Data service.
@@ -228,8 +249,7 @@ class Polar {
       'getAvailableHrServiceDataTypes',
       identifier,
     );
-    if (response == null) return {};
-    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+    return _decodeDataTypes(response);
   }
 
   ///  Request the stream settings available in current operation mode. This request shall be used before the stream is started
@@ -608,8 +628,7 @@ class Polar {
       'getAvailableOfflineRecordingDataTypes',
       identifier,
     );
-    if (response == null) return {};
-    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+    return _decodeDataTypes(response);
   }
 
   /// Request the offline recording settings available in current operation
@@ -671,8 +690,7 @@ class Polar {
       'getOfflineRecordingStatus',
       identifier,
     );
-    if (response == null) return {};
-    return (jsonDecode(response) as List).map(PolarDataType.fromJson).toSet();
+    return _decodeDataTypes(response);
   }
 
   /// Start offline recording. Requires `offlineRecording` feature.
@@ -774,7 +792,7 @@ class Polar {
       jsonEncode(entry),
       secret?.key,
     ]);
-    return PolarOfflineRecordingData.fromJson(jsonDecode(result));
+    return _decodeLarge(result, _decodeOfflineRecordingData);
   }
 
   static var _offlineRecordChannelCount = 0;
@@ -799,19 +817,26 @@ class Polar {
     final channelName =
         'polar/offlineRecord/$identifier/${_offlineRecordChannelCount++}';
 
-    await _methodChannel.invokeMethod('createOfflineRecordChannel', [
-      channelName,
-      identifier,
-      jsonEncode(entry),
-      secret?.key,
-    ]);
+    try {
+      await _methodChannel.invokeMethod('createOfflineRecordChannel', [
+        channelName,
+        identifier,
+        jsonEncode(entry),
+        secret?.key,
+      ]);
 
-    yield* EventChannel(channelName)
-        .receiveBroadcastStream()
-        .cast<String>()
-        .map(jsonDecode)
-        .cast<Map<String, dynamic>>()
-        .map(PolarOfflineRecordingResult.fromJson);
+      yield* EventChannel(channelName)
+          .receiveBroadcastStream()
+          .cast<String>()
+          .asyncMap((e) => _decodeLarge(e, _decodeOfflineRecordingResult));
+    } finally {
+      // The native channel cleans itself up when the stream is cancelled, but
+      // never hears about it if the stream is cancelled before it's listened to
+      await _methodChannel.invokeMethod(
+        'disposeOfflineRecordChannel',
+        channelName,
+      );
+    }
   }
 
   /// Remove an offline recording from the device. Requires `offlineRecording`

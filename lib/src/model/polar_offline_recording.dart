@@ -1,11 +1,9 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:json_annotation/json_annotation.dart';
 import 'package:meta/meta.dart';
 import 'package:polar/polar.dart';
 import 'package:polar/src/model/convert.dart';
-import 'package:recase/recase.dart';
 
 part 'polar_offline_recording.g.dart';
 
@@ -359,26 +357,11 @@ enum PolarOfflineRecordingTriggerMode {
   triggerExerciseStart;
 
   /// Create a [PolarOfflineRecordingTriggerMode] from json
-  static PolarOfflineRecordingTriggerMode fromJson(dynamic json) {
-    if (Platform.isIOS) {
-      return PolarOfflineRecordingTriggerMode.values[json as int];
-    } else {
-      // This is android
-      return PolarOfflineRecordingTriggerMode.values.byName(
-        (json as String).camelCase,
-      );
-    }
-  }
+  static PolarOfflineRecordingTriggerMode fromJson(dynamic json) =>
+      platformEnumFromJson(PolarOfflineRecordingTriggerMode.values, json);
 
   /// Convert a [PolarOfflineRecordingTriggerMode] to json
-  dynamic toJson() {
-    if (Platform.isIOS) {
-      return index;
-    } else {
-      // This is android
-      return name.snakeCase.toUpperCase();
-    }
-  }
+  dynamic toJson() => platformEnumToJson(this);
 }
 
 dynamic _triggerModeToJson(PolarOfflineRecordingTriggerMode mode) =>

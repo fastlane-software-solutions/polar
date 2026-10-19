@@ -22,6 +22,49 @@ private func jsonEncode(_ value: Encodable) -> String? {
   return data
 }
 
+extension PrimitiveSequence where Trait == SingleTrait {
+  /// Reply with the JSON encoded result of `encode`, or a `FlutterError` with `code`
+  fileprivate func reply(
+    _ result: @escaping FlutterResult, _ code: String,
+    _ encode: @escaping (Element) -> Encodable
+  ) {
+    _ = subscribe(
+      onSuccess: { value in
+        guard let data = jsonEncode(encode(value)) else {
+          result(FlutterError(code: code, message: "Unable to encode result", details: nil))
+          return
+        }
+        result(data)
+      },
+      onFailure: {
+        result(FlutterError(code: code, message: $0.localizedDescription, details: nil))
+      })
+  }
+}
+
+extension PrimitiveSequence where Trait == CompletableTrait, Element == Never {
+  /// Reply with nil on completion, or a `FlutterError` with `code`
+  fileprivate func reply(_ result: @escaping FlutterResult, _ code: String) {
+    _ = subscribe(
+      onCompleted: {
+        result(nil)
+      },
+      onError: {
+        result(FlutterError(code: code, message: $0.localizedDescription, details: nil))
+      })
+  }
+}
+
+private func decodeEntry(_ json: Any) throws -> PolarOfflineRecordingEntry {
+  try decoder.decode(
+    PolarOfflineRecordingEntryCodable.self, from: (json as! String).data(using: .utf8)!
+  ).data
+}
+
+private func dataTypeIndices(_ types: some Sequence<PolarDeviceDataType>) -> [Int] {
+  types.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! }
+}
+
 public class PolarPlugin:
   NSObject,
   FlutterPlugin,
@@ -166,6 +209,8 @@ public class PolarPlugin:
         try getOfflineRecord(call, result)
       case "createOfflineRecordChannel":
         try createOfflineRecordChannel(call, result)
+      case "disposeOfflineRecordChannel":
+        disposeOfflineRecordChannel(call, result)
       case "removeOfflineRecord":
         try removeOfflineRecord(call, result)
       case "setOfflineRecordingTrigger":
@@ -447,24 +492,8 @@ public class PolarPlugin:
   ) {
     let identifier = call.arguments as! String
 
-    _ = api.getAvailableOfflineRecordingDataTypes(identifier).subscribe(
-      onSuccess: { data in
-        guard let data = jsonEncode(data.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! })
-        else {
-          result(
-            FlutterError(
-              code: "Unable to get available offline recording data types", message: nil,
-              details: nil))
-          return
-        }
-        result(data)
-      },
-      onFailure: {
-        result(
-          FlutterError(
-            code: "Unable to get available offline recording data types",
-            message: $0.localizedDescription, details: nil))
-      })
+    api.getAvailableOfflineRecordingDataTypes(identifier).reply(
+      result, "Unable to get available offline recording data types") { dataTypeIndices($0) }
   }
 
   func requestOfflineRecordingSettings(
@@ -474,18 +503,8 @@ public class PolarPlugin:
     let identifier = arguments[0] as! String
     let feature = PolarDeviceDataType.allCases[arguments[1] as! Int]
 
-    _ = api.requestOfflineRecordingSettings(identifier, feature: feature).subscribe(
-      onSuccess: { data in
-        guard let data = jsonEncode(PolarSensorSettingCodable(data))
-        else { return }
-        result(data)
-      },
-      onFailure: {
-        result(
-          FlutterError(
-            code: "Unable to request offline recording settings",
-            message: $0.localizedDescription, details: nil))
-      })
+    api.requestOfflineRecordingSettings(identifier, feature: feature).reply(
+      result, "Unable to request offline recording settings", PolarSensorSettingCodable.init)
   }
 
   func requestFullOfflineRecordingSettings(
@@ -495,36 +514,16 @@ public class PolarPlugin:
     let identifier = arguments[0] as! String
     let feature = PolarDeviceDataType.allCases[arguments[1] as! Int]
 
-    _ = api.requestFullOfflineRecordingSettings(identifier, feature: feature).subscribe(
-      onSuccess: { data in
-        guard let data = jsonEncode(PolarSensorSettingCodable(data))
-        else { return }
-        result(data)
-      },
-      onFailure: {
-        result(
-          FlutterError(
-            code: "Unable to request full offline recording settings",
-            message: $0.localizedDescription, details: nil))
-      })
+    api.requestFullOfflineRecordingSettings(identifier, feature: feature).reply(
+      result, "Unable to request full offline recording settings", PolarSensorSettingCodable.init)
   }
 
   func getOfflineRecordingStatus(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
     let identifier = call.arguments as! String
 
-    _ = api.getOfflineRecordingStatus(identifier).subscribe(
-      onSuccess: { data in
-        let active = data.filter { $0.value }.keys
-        guard let data = jsonEncode(active.map { PolarDeviceDataType.allCases.firstIndex(of: $0)! })
-        else { return }
-        result(data)
-      },
-      onFailure: {
-        result(
-          FlutterError(
-            code: "Unable to get offline recording status", message: $0.localizedDescription,
-            details: nil))
-      })
+    api.getOfflineRecordingStatus(identifier).reply(
+      result, "Unable to get offline recording status"
+    ) { dataTypeIndices($0.filter { $0.value }.keys) }
   }
 
   func startOfflineRecording(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) throws {
@@ -536,18 +535,8 @@ public class PolarPlugin:
     }
     let secret = try recordingSecret(arguments[3])
 
-    _ = api.startOfflineRecording(
-      identifier, feature: feature, settings: settings, secret: secret
-    ).subscribe(
-      onCompleted: {
-        result(nil)
-      },
-      onError: { error in
-        result(
-          FlutterError(
-            code: "Error starting offline recording", message: error.localizedDescription,
-            details: nil))
-      })
+    api.startOfflineRecording(identifier, feature: feature, settings: settings, secret: secret)
+      .reply(result, "Error starting offline recording")
   }
 
   func stopOfflineRecording(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
@@ -555,26 +544,19 @@ public class PolarPlugin:
     let identifier = arguments[0] as! String
     let feature = PolarDeviceDataType.allCases[arguments[1] as! Int]
 
-    _ = api.stopOfflineRecording(identifier, feature: feature).subscribe(
-      onCompleted: {
-        result(nil)
-      },
-      onError: { error in
-        result(
-          FlutterError(
-            code: "Error stopping offline recording", message: error.localizedDescription,
-            details: nil))
-      })
+    api.stopOfflineRecording(identifier, feature: feature).reply(
+      result, "Error stopping offline recording")
   }
 
   func listOfflineRecordings(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
     let identifier = call.arguments as! String
 
     var recordings = [String]()
+    var failed = false
     _ = api.listOfflineRecordings(identifier).subscribe(
       onNext: { data in
-        guard let data = jsonEncode(PolarOfflineRecordingEntryCodable(data))
-        else {
+        guard let data = jsonEncode(PolarOfflineRecordingEntryCodable(data)) else {
+          failed = true
           return
         }
         recordings.append(data)
@@ -586,6 +568,13 @@ public class PolarPlugin:
             details: nil))
       },
       onCompleted: {
+        guard !failed else {
+          result(
+            FlutterError(
+              code: "Error listing offline recordings",
+              message: "Unable to encode offline recording entry", details: nil))
+          return
+        }
         result(recordings)
       })
   }
@@ -593,26 +582,11 @@ public class PolarPlugin:
   func getOfflineRecord(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) throws {
     let arguments = call.arguments as! [Any]
     let identifier = arguments[0] as! String
-    let entry = try decoder.decode(
-      PolarOfflineRecordingEntryCodable.self,
-      from: (arguments[1] as! String).data(using: .utf8)!
-    ).data
+    let entry = try decodeEntry(arguments[1])
     let secret = try recordingSecret(arguments[2])
 
-    _ = api.getOfflineRecord(identifier, entry: entry, secret: secret).subscribe(
-      onSuccess: { data in
-        guard let data = jsonEncode(PolarOfflineRecordingDataCodable(data))
-        else {
-          return
-        }
-        result(data)
-      },
-      onFailure: { error in
-        result(
-          FlutterError(
-            code: "Error fetching offline recording", message: error.localizedDescription,
-            details: nil))
-      })
+    api.getOfflineRecord(identifier, entry: entry, secret: secret).reply(
+      result, "Error fetching offline recording", PolarOfflineRecordingDataCodable.init)
   }
 
   private func createOfflineRecordChannel(
@@ -621,39 +595,40 @@ public class PolarPlugin:
     let arguments = call.arguments as! [Any]
     let name = arguments[0] as! String
     let identifier = arguments[1] as! String
-    let entry = try decoder.decode(
-      PolarOfflineRecordingEntryCodable.self,
-      from: (arguments[2] as! String).data(using: .utf8)!
-    ).data
+    let entry = try decodeEntry(arguments[2])
     let secret = try recordingSecret(arguments[3])
 
-    offlineRecordChannels[name] = OfflineRecordChannel(
+    // A channel with the same name is left over from before a hot restart
+    offlineRecordChannels.removeValue(forKey: name)?.dispose()
+
+    var channel: OfflineRecordChannel?
+    channel = OfflineRecordChannel(
       messenger, name, api, identifier, entry, secret
     ) { [weak self] in
-      self?.offlineRecordChannels.removeValue(forKey: name)
+      guard let self, self.offlineRecordChannels[name] === channel else { return }
+      self.offlineRecordChannels.removeValue(forKey: name)
     }
+    offlineRecordChannels[name] = channel
 
+    result(nil)
+  }
+
+  private func disposeOfflineRecordChannel(
+    _ call: FlutterMethodCall, _ result: @escaping FlutterResult
+  ) {
+    let name = call.arguments as! String
+
+    offlineRecordChannels.removeValue(forKey: name)?.dispose()
     result(nil)
   }
 
   func removeOfflineRecord(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) throws {
     let arguments = call.arguments as! [Any]
     let identifier = arguments[0] as! String
-    let entry = try decoder.decode(
-      PolarOfflineRecordingEntryCodable.self,
-      from: (arguments[1] as! String).data(using: .utf8)!
-    ).data
+    let entry = try decodeEntry(arguments[1])
 
-    _ = api.removeOfflineRecord(identifier, entry: entry).subscribe(
-      onCompleted: {
-        result(nil)
-      },
-      onError: { error in
-        result(
-          FlutterError(
-            code: "Error removing offline recording", message: error.localizedDescription,
-            details: nil))
-      })
+    api.removeOfflineRecord(identifier, entry: entry).reply(
+      result, "Error removing offline recording")
   }
 
   func setOfflineRecordingTrigger(_ call: FlutterMethodCall, _ result: @escaping FlutterResult)
@@ -667,16 +642,8 @@ public class PolarPlugin:
     ).data
     let secret = try recordingSecret(arguments[2])
 
-    _ = api.setOfflineRecordingTrigger(identifier, trigger: trigger, secret: secret).subscribe(
-      onCompleted: {
-        result(nil)
-      },
-      onError: { error in
-        result(
-          FlutterError(
-            code: "Error setting offline recording trigger", message: error.localizedDescription,
-            details: nil))
-      })
+    api.setOfflineRecordingTrigger(identifier, trigger: trigger, secret: secret).reply(
+      result, "Error setting offline recording trigger")
   }
 
   func getOfflineRecordingTriggerSetup(
@@ -684,20 +651,9 @@ public class PolarPlugin:
   ) {
     let identifier = call.arguments as! String
 
-    _ = api.getOfflineRecordingTriggerSetup(identifier).subscribe(
-      onSuccess: { data in
-        guard let data = jsonEncode(PolarOfflineRecordingTriggerCodable(data))
-        else {
-          return
-        }
-        result(data)
-      },
-      onFailure: { error in
-        result(
-          FlutterError(
-            code: "Error getting offline recording trigger setup",
-            message: error.localizedDescription, details: nil))
-      })
+    api.getOfflineRecordingTriggerSetup(identifier).reply(
+      result, "Error getting offline recording trigger setup",
+      PolarOfflineRecordingTriggerCodable.init)
   }
 
   func setLedConfig(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
@@ -1087,6 +1043,7 @@ class OfflineRecordChannel: NSObject, FlutterStreamHandler {
       .subscribe(
         onNext: { data in
           guard let data = jsonEncode(PolarOfflineRecordingResultCodable(data)) else {
+            self.fail("Unable to encode offline recording result", events)
             return
           }
           DispatchQueue.main.async {
@@ -1094,12 +1051,7 @@ class OfflineRecordChannel: NSObject, FlutterStreamHandler {
           }
         },
         onError: { error in
-          DispatchQueue.main.async {
-            events(
-              FlutterError(
-                code: "Error fetching offline recording", message: error.localizedDescription,
-                details: nil))
-          }
+          self.fail(error.localizedDescription, events)
         },
         onCompleted: {
           DispatchQueue.main.async {
@@ -1108,6 +1060,16 @@ class OfflineRecordChannel: NSObject, FlutterStreamHandler {
         })
 
     return nil
+  }
+
+  /// The download can't continue. Ending the stream makes Dart cancel it, which
+  /// disposes the channel.
+  private func fail(_ message: String, _ events: @escaping FlutterEventSink) {
+    subscription?.dispose()
+    DispatchQueue.main.async {
+      events(FlutterError(code: "Error fetching offline recording", message: message, details: nil))
+      events(FlutterEndOfEventStream)
+    }
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
