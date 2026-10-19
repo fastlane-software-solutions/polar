@@ -39,6 +39,17 @@ void main() async {
       PolarDataType.magnetometer,
     },
   );
+  testOfflineRecording(
+    identifier,
+    features: {
+      PolarDataType.hr,
+      PolarDataType.acc,
+      PolarDataType.ppg,
+      PolarDataType.ppi,
+      PolarDataType.gyro,
+      PolarDataType.magnetometer,
+    },
+  );
   testSdkMode(identifier);
   testMisc(identifier, supportsLedConfig: true);
   testShutDown(identifier);
